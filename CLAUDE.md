@@ -20,6 +20,11 @@ org-jira is an Emacs package that syncs Jira issues, comments, worklogs and boar
 
 `t/batch-runner/{request,dash}.el` are stubs so tests run without those packages installed. New tests go in `t/org-jira-t.el` or `t/jiralib-t.el` and must be registered via the Makefile's `-l` list if you add a file.
 
+## Testing notes
+
+- `org-jira.el` has `lexical-binding: t`; `jiralib.el`, `org-jira-sdk.el` and the `t/*.el` files do not. Closures in tests capture dynamically, so test macros that bind a variable and stub with `cl-letf` work only because the stub is called inside the `let`'s extent.
+- Stub Jira with `(cl-letf (((symbol-function 'jiralib-...) ...)))`; see `org-jira-t-with-comment-popup` and `org-jira-t-with-user-search` in `t/org-jira-t.el`. New tests go above the `(provide ...)` line.
+
 ## Architecture
 
 Layering, bottom to top:
@@ -35,5 +40,6 @@ Data flow for a pull: command, then `jiralib-call` (async callback), then raw al
 ## Gotchas
 
 - Everything runs async, so callbacks may fire after the user has switched buffers. `TODO.org` documents a known problem where custom-JQL result buffers don't receive mutations because chained pulls (comments, worklogs) assume the `PROJ-KEY.org` buffer.
+- The comment popup buffer must not trigger `org-edit-src-code` (e.g. by indenting inside a src block). Popup managers such as Doom's show the `*Org Src*` buffer in the same slot and silently dismiss the comment popup. It is avoided by `org-src-tab-acts-natively` being nil there; keep that if you change `org-jira-comment-edit-buffer`.
 - `rest-calls/jira.rest` holds sample REST requests for manual API exploration.
 - The `Package-Requires` headers differ between files (`dash` vs `s`) and are easy to let drift; check all three headers when adding a dependency.
