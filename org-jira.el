@@ -1123,6 +1123,31 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
     (unless (looking-at top-heading)
       (insert (format "\n* %s-Tickets\n" proj-key)))))
 
+(defun org-jira--render-description (Issue)
+  "Write the description of ISSUE under its \"Description\" subheading.
+A subheading from before the link was dropped from it
+(\"description: [[...][KEY]]\") is renamed and reused."
+  (with-slots (issue-id filename description) Issue
+    (ensure-on-issue-id-with-filename issue-id filename
+      (goto-char (point-min))
+      (if (re-search-forward "^\\*\\*\\* \\(?:Description\\|description: .*\\)$" nil t)
+          (progn
+            (beginning-of-line)
+            (org-edit-headline "Description")
+            (org-narrow-to-subtree)
+            (goto-char (point-min))
+            (forward-line 1)
+            (delete-region (point) (point-max)))
+        (if (org-goto-first-child)
+            (org-insert-heading)
+          (goto-char (point-max))
+          (open-line 1)
+          (org-insert-subheading t))
+        (org-jira-insert "Description\n"))
+      ;;  Insert 2 spaces of indentation so Jira markup won't cause org-markup
+      (org-jira-insert
+       (replace-regexp-in-string "^" "  " (format "%s" description))))))
+
 (defun org-jira--render-issue (Issue)
   "Render single ISSUE."
 ;;  (org-jira-log "Rendering issue from issue list")
@@ -1149,6 +1174,7 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
              (concat (org-jira-get-org-keyword-from-status status)
                      " "
                      (org-jira-get-org-priority-cookie-from-issue priority)
+                     (format "[[jira:%s][%s]] " issue-id issue-id)
                      headline))
             (save-excursion
               (unless (search-forward "\n" (point-max) 1)
@@ -1156,7 +1182,9 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
             (org-narrow-to-subtree)
             (save-excursion
               (org-back-to-heading t)
-              (org-set-tags-to (replace-regexp-in-string "-" "_" issue-id)))
+              ;; Issues used to be tagged with their key; the link in the
+              ;; heading replaces that, so clear tags left from older syncs.
+              (org-set-tags nil))
             (org-jira-entry-put (point) "assignee" (or (slot-value Issue 'assignee) "Unassigned"))
             (mapc (lambda (entry)
                     (let ((val (slot-value Issue entry)))
@@ -1176,35 +1204,7 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
                 (when (> (length duedate) 0)
                   (org-deadline nil duedate))))
 
-            (mapc
-             (lambda (heading-entry)
-               (ensure-on-issue-id-with-filename issue-id filename
-                                                 (let* ((entry-heading
-                                                         (concat (symbol-name heading-entry)
-                                                                 (format ": [[%s][%s]]"
-                                                                         (concat jiralib-url "/browse/" issue-id) issue-id))))
-                                                   (setq p (org-find-exact-headline-in-buffer entry-heading))
-                                                   (if (and p (>= p (point-min))
-                                                            (<= p (point-max)))
-                                                       (progn
-                                                         (goto-char p)
-                                                         (org-narrow-to-subtree)
-                                                         (goto-char (point-min))
-                                                         (forward-line 1)
-                                                         (delete-region (point) (point-max)))
-                                                     (if (org-goto-first-child)
-                                                         (org-insert-heading)
-                                                       (goto-char (point-max))
-                                                       (open-line 1)
-                                                       (org-insert-subheading t))
-                                                     (org-jira-insert entry-heading "\n"))
-
-                                                   ;;  Insert 2 spaces of indentation so Jira markup won't cause org-markup
-                                                   (org-jira-insert
-                                                    (replace-regexp-in-string
-                                                     "^" "  "
-                                                     (format "%s" (slot-value Issue heading-entry)))))))
-             '(description))
+            (org-jira--render-description Issue)
 
             (when org-jira-download-comments
               (org-jira-update-comments-for-issue Issue)
@@ -2175,13 +2175,13 @@ that should be bound to an issue."
       (cond ((eq my-key 'description)
              (org-goto-first-child)
              (forward-thing 'whitespace)
-             (if (looking-at "description: ")
+             (if (looking-at "\\(?:description: \\|Description$\\)")
                  (org-trim (org-get-entry))
                (error "Can not find description field for this issue")))
 
             ((eq my-key 'summary)
              (ensure-on-issue
-               (org-get-heading t t)))
+               (org-jira--strip-key-link (org-get-heading t t))))
 
             ;; org returns a time tuple, we need to convert it
             ((eq my-key 'deadline)
@@ -2490,6 +2490,11 @@ otherwise it should return:
                   nil)))
             (split-string org-issue-components ",\\s *")))))
 
+(defun org-jira--strip-key-link (s)
+  "Remove the issue key link that heads the summary in S, keeping any priority cookie."
+  (replace-regexp-in-string
+   "\\`\\(\\[#.\\] \\)?\\[\\[jira:[^]]*\\]\\[[^]]*\\]\\] " "\\1" s))
+
 (defun org-jira-strip-priority-tags (s)
   "Given string S, remove any priority tags in the brackets."
   (->> s (replace-regexp-in-string "\\[#.*?\\]" "") org-trim))
@@ -2733,13 +2738,8 @@ See `org-jira-get-issues-from-filter'."
    (list (completing-read "Filter: " (mapcar 'cdr (jiralib-get-saved-filters)))))
   (org-jira-get-issues-headonly (jiralib-get-issues-from-filter (car (rassoc filter (jiralib-get-saved-filters))))))
 
-(org-add-link-type "jira" 'org-jira-open)
-
-;; This was only added in org 9.0, not sure all org users will have
-;; that version, so keep the deprecated one from above for now.
-
-;;(org-link-set-parameters "jira" ((:follow . 'org-jira-open)))
-
+;; The deprecated `org-add-link-type' call this replaces made the link open
+;; the issue in org; it now opens it in the browser.
 (defun org-jira-open (path)
   "Open a Jira Link from PATH."
   (org-jira-get-issue path))
@@ -2751,6 +2751,31 @@ See `org-jira-get-issues-from-filter'."
                       account-id)))
 
 (org-link-set-parameters "jira-user" :follow #'org-jira-open-user)
+
+(defun org-jira--browse-url (issue-key)
+  "Return the Jira browse URL of ISSUE-KEY."
+  (format "%s/browse/%s" (replace-regexp-in-string "/*$" "" jiralib-url) issue-key))
+
+(defun org-jira-link-export (issue-key description backend _info)
+  "Export a `jira' link to ISSUE-KEY, shown as DESCRIPTION, for BACKEND."
+  (let ((url (org-jira--browse-url issue-key))
+        (text (or description issue-key)))
+    (pcase backend
+      ('html (format "<a href=\"%s\">%s</a>" url text))
+      ('latex (format "\\href{%s}{%s}" url text))
+      (_ (or description issue-key)))))
+
+(defun org-jira-link-insert-description (link-location _description)
+  "Return \"KEY: summary\" for the `jira' link at LINK-LOCATION."
+  (let* ((issue-key (replace-regexp-in-string "^jira:" "" link-location))
+         (issue (jiralib-get-issue issue-key)))
+    (concat issue-key ": " (cdr (assoc 'summary (cdr (assoc 'fields issue)))))))
+
+(org-link-set-parameters
+ "jira"
+ :follow (lambda (issue-key &optional _) (browse-url (org-jira--browse-url issue-key)))
+ :export #'org-jira-link-export
+ :insert-description #'org-jira-link-insert-description)
 
 ;;;###autoload
 (defun org-jira-get-issues-by-board ()

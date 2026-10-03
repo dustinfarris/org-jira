@@ -514,5 +514,106 @@ Bind `fetched' to the list of ids the stub was asked for."
     (should (equal '("d4") fetched))))
 
 
+;;; Issue heading carries the key link; plain Description subheader
+
+(defun org-jira-t-issue (summary)
+  "Build an issue record for T-1 from raw Jira data."
+  (org-jira-sdk-create-issue-from-data
+   `((key . "T-1") (id . "10001")
+     (fields . ((summary . ,summary) (description . "the text")
+                (status . ((name . "To Do"))) (priority . ((name . "High")))
+                (project . ((key . "T"))) (issuetype . ((name . "Task") (id . "3")))
+                (assignee . ((displayName . "Ann"))) (reporter . ((displayName . "Bob")))
+                (created . "2026-10-02T15:35:12.000+0000")
+                (updated . "2026-10-02T15:35:12.000+0000")
+                (labels . []) (components . []))))))
+
+(defun org-jira-t-render-issue (summary)
+  "Render T-1 with SUMMARY into the project file and return its text."
+  (let ((org-jira-download-comments nil)
+        (org-jira-worklog-sync-p nil))
+    (cl-letf (((symbol-function 'switch-to-buffer) #'ignore))
+      (org-jira--render-issue (org-jira-t-issue summary))))
+  (with-current-buffer (find-buffer-visiting
+                        (expand-file-name "T.org" org-jira-working-dir))
+    (save-restriction (widen) (buffer-substring-no-properties
+                               (point-min) (point-max)))))
+
+(ert-deftest org-jira-render-issue-heading-has-key-link-test ()
+  (org-jira-t-with-issue-file
+   (let ((text (org-jira-t-render-issue "Fix the thing")))
+     (should (string-match-p
+              "^\\*\\* TODO \\(?:\\[#[A-Z]\\] \\)?\\[\\[jira:T-1\\]\\[T-1\\]\\] Fix the thing$" text))
+     (should-not (string-match-p ":T_1:" text)))))
+
+(ert-deftest org-jira-render-issue-description-subheader-test ()
+  (org-jira-t-with-issue-file
+   (let ((text (org-jira-t-render-issue "Fix the thing")))
+     (should (string-match-p "^\\*\\*\\* Description\n  the text" text))
+     (should-not (string-match-p "description:" text)))))
+
+(ert-deftest org-jira-render-issue-migrates-legacy-test ()
+  (org-jira-t-with-issue-file
+   (with-temp-file (expand-file-name "T.org" org-jira-working-dir)
+     (insert "* Project: [[file:T.org][T]]\n"
+             "** TODO [#C] Old summary   :T_1:\n:PROPERTIES:\n:ID: T-1\n:END:\n"
+             "*** description: [[https://x/browse/T-1][T-1]]\n  old text\n"))
+   (let ((text (org-jira-t-render-issue "New summary")))
+     (should-not (string-match-p ":T_1:" text))
+     (should-not (string-match-p "description:" text))
+     (should-not (string-match-p "old text" text))
+     (should (= 1 (with-temp-buffer (insert text) (goto-char (point-min))
+                                    (how-many "^\\*\\*\\* Description$"))))
+     (should (string-match-p "\\[\\[jira:T-1\\]\\[T-1\\]\\] New summary$" text)))))
+
+(ert-deftest org-jira-issue-summary-from-org-strips-key-link-test ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "** TODO [#B] [[jira:T-1][T-1]] Fix the thing\n:PROPERTIES:\n:ID: T-1\n:END:\n")
+    (goto-char (point-min))
+    (should (string= "Fix the thing"
+                     (org-jira-strip-priority-tags
+                      (org-jira-get-issue-val-from-org 'summary))))
+    ;; Headings from before the link was added still work.
+    (erase-buffer)
+    (insert "** TODO [#B] Fix the thing\n:PROPERTIES:\n:ID: T-1\n:END:\n")
+    (goto-char (point-min))
+    (should (string= "Fix the thing"
+                     (org-jira-strip-priority-tags
+                      (org-jira-get-issue-val-from-org 'summary))))))
+
+(ert-deftest org-jira-issue-description-from-org-reads-both-headings-test ()
+  (dolist (heading '("Description" "description: [[https://x/browse/T-1][T-1]]"))
+    (with-temp-buffer
+      (org-mode)
+      (insert "** TODO T-1\n:PROPERTIES:\n:ID: T-1\n:END:\n*** " heading "\n  the text\n")
+      (goto-char (point-min))
+      (should (string= "the text" (org-jira-get-issue-val-from-org 'description))))))
+
+(ert-deftest org-jira-jira-link-follow-test ()
+  (let ((jiralib-url "https://jira.example.com/") opened)
+    (cl-letf (((symbol-function 'browse-url) (lambda (u) (setq opened u))))
+      (funcall (org-link-get-parameter "jira" :follow) "T-1" nil))
+    (should (string= "https://jira.example.com/browse/T-1" opened))))
+
+(ert-deftest org-jira-jira-link-export-test ()
+  (let ((jiralib-url "https://jira.example.com")
+        (export (org-link-get-parameter "jira" :export)))
+    (should (string= "<a href=\"https://jira.example.com/browse/T-1\">Look</a>"
+                     (funcall export "T-1" "Look" 'html nil)))
+    (should (string= "<a href=\"https://jira.example.com/browse/T-1\">T-1</a>"
+                     (funcall export "T-1" nil 'html nil)))
+    (should (string= "\\href{https://jira.example.com/browse/T-1}{T-1}"
+                     (funcall export "T-1" nil 'latex nil)))
+    (should (string= "T-1" (funcall export "T-1" nil 'ascii nil)))))
+
+(ert-deftest org-jira-jira-link-insert-description-test ()
+  (cl-letf (((symbol-function 'jiralib-get-issue)
+             (lambda (key &optional _) `((fields . ((summary . ,(concat "S of " key))))))))
+    (should (string= "T-1: S of T-1"
+                     (funcall (org-link-get-parameter "jira" :insert-description)
+                              "jira:T-1" nil)))))
+
+
 (provide 'org-jira-t)
 ;;; org-jira-t.el ends here
