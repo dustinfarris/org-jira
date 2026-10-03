@@ -1136,28 +1136,6 @@ every render."
           (org-map-region #'org-promote (point) end)
           (set-marker end nil))))))
 
-(defun org-jira--is-top-headline? (proj-key)
-  "For PROJ-KEY, check if it is a top headline or not."
-  (let ((elem (org-element-at-point)))
-    (and (eq 'headline (car elem))
-         (equal (format "%s-Tickets" proj-key)
-                (org-element-property :title elem))
-         (= 1 (org-element-property :level elem)))))
-
-(defun org-jira--maybe-render-top-heading (proj-key)
-  "Ensure that there is a headline for PROJ-KEY at the top of the file."
-  (goto-char (point-min))
-  (let ((top-heading (format ".*%s-Tickets" proj-key))
-        (th-found? nil))
-    (while (and (not (eobp))
-                (not th-found?))
-      (beginning-of-line)
-      (when (org-jira--is-top-headline? proj-key) (setq th-found? t))
-      (re-search-forward top-heading nil 1 1))
-    (beginning-of-line)
-    (unless (looking-at top-heading)
-      (insert (format "\n* %s-Tickets\n" proj-key)))))
-
 (defun org-jira--render-description (Issue)
   "Write the description of ISSUE under its \"Description\" subheading.
 A subheading from before the link was dropped from it
@@ -1165,7 +1143,10 @@ A subheading from before the link was dropped from it
   (with-slots (issue-id filename description) Issue
     (ensure-on-issue-id-with-filename issue-id filename
       (goto-char (point-min))
-      (if (re-search-forward "^\\*\\*\\* \\(?:Description\\|description: .*\\)$" nil t)
+      (if (re-search-forward
+           (format "^%s \\(?:Description\\|description: .*\\)$"
+                   (regexp-quote (make-string (1+ (org-current-level)) ?*)))
+           nil t)
           (progn
             (beginning-of-line)
             (org-edit-headline "Description")
@@ -1192,7 +1173,7 @@ A subheading from before the link was dropped from it
       (with-current-buffer (org-jira--get-project-buffer Issue)
         (org-jira-freeze-ui
           (org-jira-maybe-activate-mode)
-          (org-jira--maybe-render-top-heading proj-key)
+          (org-jira--migrate-tickets-heading proj-key)
           (setq p (org-find-entry-with-id issue-id))
           (save-restriction
             (if (and p (>= p (point-min))
@@ -1204,7 +1185,7 @@ A subheading from before the link was dropped from it
               (goto-char (point-max))
               (unless (looking-at "^")
                 (insert "\n"))
-              (insert "** "))
+              (insert "* "))
             (org-jira-insert
              (concat (org-jira-get-org-keyword-from-status status)
                      " "
@@ -1762,14 +1743,21 @@ AUTHOR-ID, when non-nil, makes the name a `jira-user' link."
           (org-jira-date-to-org-clock created)))
 
 (defun org-jira--goto-comments-end ()
-  "Move point to the end of the \"*** Comments\" subtree, creating it if needed."
+  "Move point to the end of the issue's \"Comments\" subtree, creating it if needed.
+Return the level comment headings take under it."
   (goto-char (point-min))
-  (if (re-search-forward "^\\*\\*\\* Comments$" nil t)
-      (progn (beginning-of-line) (org-end-of-subtree t t))
-    (goto-char (point-max))
+  (let ((comments-level (1+ (org-current-level))))
+    ;; Only a direct child counts: a description can hold a heading that is
+    ;; itself titled "Comments".
+    (if (re-search-forward
+         (format "^%s Comments$" (regexp-quote (make-string comments-level ?*))) nil t)
+        (progn (beginning-of-line)
+               (org-end-of-subtree t t))
+      (goto-char (point-max))
+      (unless (bolp) (insert "\n"))
+      (insert (make-string comments-level ?*) " Comments\n"))
     (unless (bolp) (insert "\n"))
-    (insert "*** Comments\n"))
-  (unless (bolp) (insert "\n")))
+    (1+ comments-level)))
 
 (defun org-jira--render-comment (Issue Comment)
   (with-slots (issue-id) Issue
@@ -1782,8 +1770,7 @@ AUTHOR-ID, when non-nil, makes the name a `jira-user' link."
           (goto-char p)
           (org-back-to-heading t)
           (delete-region (point) (progn (org-end-of-subtree t t) (point))))
-        (org-jira--goto-comments-end)
-        (insert "**** ")
+        (insert (make-string (org-jira--goto-comments-end) ?*) " ")
         (org-jira-insert (org-jira--comment-headline created author-id author) "\n")
         (org-narrow-to-subtree)
         (org-jira-entry-put (point) "ID" comment-id)

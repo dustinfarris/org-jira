@@ -373,20 +373,28 @@ SUBMITTED is set to the list of texts the submit function received."
    `((id . ,id) (created . ,created) (updated . ,created) (body . ,body)
      (author . ((displayName . ,name) (accountId . ,author-id))))))
 
-(defmacro org-jira-t-with-issue-file (&rest body)
-  "Run BODY with `org-jira-working-dir' holding T.org with issue T-1."
+(defconst org-jira-t-issue-file-text
+  (concat "* TODO T-1 an issue\n:PROPERTIES:\n:ID: T-1\n:END:\n"
+          "** Worklog: someone\n:PROPERTIES:\n:ID: w1\n:END:\n")
+  "The default content of T.org: issue T-1 with a worklog child.")
+
+(defmacro org-jira-t-with-project-file (content &rest body)
+  "Run BODY with `org-jira-working-dir' holding T.org containing CONTENT."
+  (declare (indent 1))
   `(let* ((dir (make-temp-file "org-jira-t" t))
           (org-jira-working-dir dir)
           (file (expand-file-name "T.org" dir)))
-     (with-temp-file file
-       (insert "** TODO T-1 an issue\n:PROPERTIES:\n:ID: T-1\n:END:\n"
-               "*** Worklog: someone\n:PROPERTIES:\n:ID: w1\n:END:\n"))
+     (with-temp-file file (insert ,content))
      (unwind-protect
          (progn ,@body)
        (when-let* ((buf (find-buffer-visiting file)))
          (with-current-buffer buf (set-buffer-modified-p nil))
          (kill-buffer buf))
        (delete-directory dir t))))
+
+(defmacro org-jira-t-with-issue-file (&rest body)
+  "Run BODY with `org-jira-working-dir' holding T.org with issue T-1."
+  `(org-jira-t-with-project-file org-jira-t-issue-file-text ,@body))
 
 (defun org-jira-t-render (&rest comments)
   "Render COMMENTS on T-1 and return the project file's text."
@@ -424,9 +432,9 @@ SUBMITTED is set to the list of texts the submit function received."
                 (org-jira-t-comment "1" "2026-10-02T15:35:12.000+0000" "12345" "Ann" "first")
                 (org-jira-t-comment "2" "2026-10-02T16:00:00.000+0000" "678" "Bob" "second"))))
      (should (= 1 (with-temp-buffer (insert text) (goto-char (point-min))
-                                    (how-many "^\\*\\*\\* Comments$"))))
+                                    (how-many "^\\*\\* Comments$"))))
      ;; Comments sit after the worklog, not inside it.
-     (should (string-match-p "Worklog: someone\n:PROPERTIES:\n:ID: w1\n:END:\n\\*\\*\\* Comments\n\\*\\*\\*\\* \\[\\[jira-user:12345\\]\\[@Ann\\]\\] \\[[^]]+\\]\n"
+     (should (string-match-p "Worklog: someone\n:PROPERTIES:\n:ID: w1\n:END:\n\\*\\* Comments\n\\*\\*\\* \\[\\[jira-user:12345\\]\\[@Ann\\]\\] \\[[^]]+\\]\n"
                              text))
      (should (< (string-match "@Ann" text) (string-match "@Bob" text))))))
 
@@ -439,28 +447,28 @@ SUBMITTED is set to the list of texts the submit function received."
      (should (string-match-p "new" text))
      (should-not (string-match-p "old" text))
      (should (= 1 (with-temp-buffer (insert text) (goto-char (point-min))
-                                    (how-many "^\\*\\*\\*\\* ")))))))
+                                    (how-many "^\\*\\*\\* ")))))))
 
 (ert-deftest org-jira-render-comment-migrates-legacy-heading-test ()
   (org-jira-t-with-issue-file
    (with-temp-file (expand-file-name "T.org" org-jira-working-dir)
-     (insert "** TODO T-1 an issue\n:PROPERTIES:\n:ID: T-1\n:END:\n"
-             "*** Comment: Ann\n:PROPERTIES:\n:ID: 1\n:END:\n  legacy\n"
-             "*** Worklog: someone\n:PROPERTIES:\n:ID: w1\n:END:\n"))
+     (insert "* TODO T-1 an issue\n:PROPERTIES:\n:ID: T-1\n:END:\n"
+             "** Comment: Ann\n:PROPERTIES:\n:ID: 1\n:END:\n  legacy\n"
+             "** Worklog: someone\n:PROPERTIES:\n:ID: w1\n:END:\n"))
    (let ((text (org-jira-t-render
                 (org-jira-t-comment "1" "2026-10-02T15:35:12.000+0000" "12345" "Ann" "body"))))
      (should-not (string-match-p "Comment: Ann" text))
      (should-not (string-match-p "legacy" text))
-     (should (string-match-p "\\*\\*\\* Comments\n\\*\\*\\*\\* \\[\\[jira-user:12345\\]" text))
+     (should (string-match-p "\\*\\* Comments\n\\*\\*\\* \\[\\[jira-user:12345\\]" text))
      (should (string-match-p "Worklog: someone" text)))))
 
 (ert-deftest org-jira-ensure-on-comment-recognizes-nested-comment-test ()
   (with-temp-buffer
     (org-mode)
-    (insert "** TODO T-1\n*** Comments\n**** [[jira-user:1][@A]] [2026-10-02 Fri 15:35]\n:PROPERTIES:\n:ID: 9\n:END:\n  hi\n")
+    (insert "* TODO T-1\n** Comments\n*** [[jira-user:1][@A]] [2026-10-02 Fri 15:35]\n:PROPERTIES:\n:ID: 9\n:END:\n  hi\n")
     (should (equal "9" (org-jira-get-from-org 'comment 'id)))
     (goto-char (point-min))
-    (re-search-forward "^\\*\\*\\* Comments")
+    (re-search-forward "^\\*\\* Comments")
     (should-error (org-jira-get-from-org 'comment 'id))))
 
 (ert-deftest org-jira-user-link-follow-test ()
@@ -543,19 +551,19 @@ Bind `fetched' to the list of ids the stub was asked for."
   (org-jira-t-with-issue-file
    (let ((text (org-jira-t-render-issue "Fix the thing")))
      (should (string-match-p
-              "^\\*\\* TODO \\(?:\\[#[A-Z]\\] \\)?\\[\\[jira:T-1\\]\\[T-1\\]\\] Fix the thing$" text))
+              "^\\* TODO \\(?:\\[#[A-Z]\\] \\)?\\[\\[jira:T-1\\]\\[T-1\\]\\] Fix the thing$" text))
      (should-not (string-match-p ":T_1:" text)))))
 
 (ert-deftest org-jira-render-issue-description-subheader-test ()
   (org-jira-t-with-issue-file
    (let ((text (org-jira-t-render-issue "Fix the thing")))
-     (should (string-match-p "^\\*\\*\\* Description\n  the text" text))
+     (should (string-match-p "^\\*\\* Description\n  the text" text))
      (should-not (string-match-p "description:" text)))))
 
 (ert-deftest org-jira-render-issue-migrates-legacy-test ()
   (org-jira-t-with-issue-file
    (with-temp-file (expand-file-name "T.org" org-jira-working-dir)
-     (insert "* Project: [[file:T.org][T]]\n"
+     (insert "* T-Tickets\n"
              "** TODO [#C] Old summary   :T_1:\n:PROPERTIES:\n:ID: T-1\n:END:\n"
              "*** description: [[https://x/browse/T-1][T-1]]\n  old text\n"))
    (let ((text (org-jira-t-render-issue "New summary")))
@@ -563,8 +571,9 @@ Bind `fetched' to the list of ids the stub was asked for."
      (should-not (string-match-p "description:" text))
      (should-not (string-match-p "old text" text))
      (should (= 1 (with-temp-buffer (insert text) (goto-char (point-min))
-                                    (how-many "^\\*\\*\\* Description$"))))
-     (should (string-match-p "\\[\\[jira:T-1\\]\\[T-1\\]\\] New summary$" text)))))
+                                    (how-many "^\\*\\* Description$"))))
+     (should-not (string-match-p "Tickets" text))
+     (should (string-match-p "^\\* TODO .*\\[\\[jira:T-1\\]\\[T-1\\]\\] New summary$" text)))))
 
 (ert-deftest org-jira-issue-summary-from-org-strips-key-link-test ()
   (with-temp-buffer
@@ -773,6 +782,89 @@ Bind `fetched' to the list of ids the stub was asked for."
     (search-forward "Comment:")
     (beginning-of-line)
     (should (org-jira--comment-heading-p))))
+
+;;; Top-level issues: rendering
+
+(ert-deftest org-jira-render-issue-fresh-file-layout-test ()
+  (org-jira-t-with-project-file ""
+    (org-jira-t-render-issue "Fix the thing")
+    (let ((text (org-jira-t-render
+                 (org-jira-t-comment "1" "2026-10-02T15:35:12.000+0000" "12345" "Ann" "hi"))))
+      (should-not (string-match-p "Tickets" text))
+      (should (string-match-p "\\`\\* TODO .*\\[\\[jira:T-1\\]\\[T-1\\]\\] Fix the thing\n" text))
+      (should (string-match-p "^\\*\\* Description\n  the text\n" text))
+      (should (string-match-p "^\\*\\* Comments\n\\*\\*\\* \\[\\[jira-user:12345\\]\\[@Ann\\]\\] \\[" text)))))
+
+(ert-deftest org-jira-render-issue-migrates-wrapper-and-is-stable-test ()
+  (org-jira-t-with-project-file
+      (concat "* T-Tickets\n"
+              "** TODO [[jira:T-2][T-2]] other\n:PROPERTIES:\n:ID: T-2\n:END:\n"
+              "*** Description\n  other text\n"
+              "** TODO old\n:PROPERTIES:\n:ID: T-1\n:END:\n")
+    (let ((once (org-jira-t-render-issue "Fix the thing")))
+      (should-not (string-match-p "Tickets" once))
+      (should (string-match-p "^\\* TODO \\[\\[jira:T-2\\]\\[T-2\\]\\] other$" once))
+      (should (string-match-p "^\\*\\* Description\n  other text$" once))
+      (should (string-match-p "^\\* TODO .*Fix the thing$" once))
+      (should (equal '("T-2" "T-1")
+                     (with-temp-buffer (org-mode) (insert once)
+                                       (org-jira--issue-ids-in-buffer))))
+      ;; A second sync changes nothing structural.  (Re-rendering a description
+      ;; drops its final newline, which is not what this test is about.)
+      (should (string= (string-trim-right once)
+                       (string-trim-right (org-jira-t-render-issue "Fix the thing")))))))
+
+(ert-deftest org-jira-render-issue-round-trips-through-org-test ()
+  (org-jira-t-with-project-file ""
+    (org-jira-t-render-issue "Fix the thing")
+    (with-current-buffer (find-buffer-visiting (expand-file-name "T.org" org-jira-working-dir))
+      (goto-char (point-min))
+      (search-forward "the text")
+      (should (string= "Fix the thing"
+                       (org-jira-strip-priority-tags
+                        (org-jira-get-issue-val-from-org 'summary))))
+      (should (string= "the text" (org-jira-get-issue-val-from-org 'description)))
+      (should (string= "T-1" (org-jira-get-issue-val-from-org 'ID))))))
+
+(ert-deftest org-jira-attachments-insert-one-level-under-issue-test ()
+  (org-jira-t-with-project-file ""
+    (org-jira-t-render-issue "Fix the thing")
+    (cl-letf (((symbol-function 'jiralib-get-attachments)
+               (lambda (_issue-id callback)
+                 (funcall callback
+                          :data '((fields . ((attachment . (((id . "91") (author . "Ann")
+                                                            (created . "2026-10-02T15:35:12.000+0000")
+                                                            (size . 10) (mimeType . "image/png")
+                                                            (content . "https://x/f.png")
+                                                            (filename . "f.png"))))))))))
+              ((symbol-function 'org-jira-get-from-org)
+               (lambda (&rest _) "T-1")))
+      (with-current-buffer (find-buffer-visiting (expand-file-name "T.org" org-jira-working-dir))
+        (goto-char (point-min))
+        (org-jira-update-attachments-for-current-issue)
+        (let ((text (save-restriction (widen) (buffer-string))))
+          (should (string-match-p "^\\*\\* Attachments:\n\\*\\*\\* \\[\\[https://x/f.png\\]\\[f.png\\]\\]" text)))))))
+
+
+(ert-deftest org-jira-render-issue-without-comments-has-no-comments-heading-test ()
+  (org-jira-t-with-project-file ""
+    (should-not (string-match-p "Comments" (org-jira-t-render-issue "Fix the thing")))))
+
+(ert-deftest org-jira-render-comment-ignores-comments-heading-inside-description-test ()
+  ;; Converted descriptions can hold a heading titled "Comments".
+  (org-jira-t-with-project-file
+      (concat "* TODO T-1 an issue\n:PROPERTIES:\n:ID: T-1\n:END:\n"
+              "** Description\n  intro\n**** Comments\n  not the real ones\n")
+    (let ((text (org-jira-t-render
+                 (org-jira-t-comment "1" "2026-10-02T15:35:12.000+0000" "12345" "Ann" "hi"))))
+      (should (string-match-p "not the real ones\n\\*\\* Comments\n\\*\\*\\* \\[\\[jira-user:12345\\]" text))
+      (should (string-match-p "^\\*\\*\\*\\* Comments\n  not the real ones\n\\*\\* Comments" text)))))
+
+(ert-deftest org-jira-render-comment-into-file-without-trailing-newline-test ()
+  (org-jira-t-with-project-file "* TODO T-1 an issue\n:PROPERTIES:\n:ID: T-1\n:END:"
+    (let ((text (org-jira-t-render
+                 (org-jira-t-comment "1" "2026-10-02T15:35:12.000+0000" "12345" "Ann" "hi"))))
+      (should (string-match-p ":END:\n\\*\\* Comments\n\\*\\*\\* \\[\\[jira-user:12345\\]" text)))))
 
 (provide 'org-jira-t)
 ;;; org-jira-t.el ends here
