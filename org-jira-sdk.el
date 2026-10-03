@@ -124,6 +124,8 @@ Traverse down the keys of KEY-CHAIN."
 
 (defclass org-jira-sdk-comment (org-jira-sdk-record)
   ((author :type string :initarg :author)
+   (author-id :type (or null string) :initarg :author-id :initform nil
+              :documentation "The author's Jira accountId, or the username on Jira Server.")
    (body :type string :initarg :body)
    (comment-id :type string :initarg :comment-id :documentation "The comment ID, such as 12345.")
    (created :type string :initarg :created)
@@ -182,6 +184,7 @@ Traverse down the keys of KEY-CHAIN."
   (cl-flet ((path (keys) (org-jira-sdk-path (oref rec data) keys)))
     (org-jira-sdk-comment
      :author (path '(author displayName))
+     :author-id (or (path '(author accountId)) (path '(author name)))
      :body (path '(body))
      :comment-id (path '(id))
      :created (path '(created))

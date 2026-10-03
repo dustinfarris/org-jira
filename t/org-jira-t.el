@@ -365,5 +365,154 @@ SUBMITTED is set to the list of texts the submit function received."
         (should (get-buffer-window buf))))))
 
 
+;;; Comments nested under a "*** Comments" heading
+
+(defun org-jira-t-comment (id created author-id name body)
+  "Build a comment record from raw Jira data."
+  (org-jira-sdk-create-comment-from-data
+   `((id . ,id) (created . ,created) (updated . ,created) (body . ,body)
+     (author . ((displayName . ,name) (accountId . ,author-id))))))
+
+(defmacro org-jira-t-with-issue-file (&rest body)
+  "Run BODY with `org-jira-working-dir' holding T.org with issue T-1."
+  `(let* ((dir (make-temp-file "org-jira-t" t))
+          (org-jira-working-dir dir)
+          (file (expand-file-name "T.org" dir)))
+     (with-temp-file file
+       (insert "** TODO T-1 an issue\n:PROPERTIES:\n:ID: T-1\n:END:\n"
+               "*** Worklog: someone\n:PROPERTIES:\n:ID: w1\n:END:\n"))
+     (unwind-protect
+         (progn ,@body)
+       (when-let* ((buf (find-buffer-visiting file)))
+         (with-current-buffer buf (set-buffer-modified-p nil))
+         (kill-buffer buf))
+       (delete-directory dir t))))
+
+(defun org-jira-t-render (&rest comments)
+  "Render COMMENTS on T-1 and return the project file's text."
+  (let ((issue (make-instance 'org-jira-sdk-issue
+                              :issue-id "T-1" :proj-key "T" :filename "T")))
+    (dolist (c comments) (org-jira--render-comment issue c))
+    (with-current-buffer (find-buffer-visiting
+                          (expand-file-name "T.org" org-jira-working-dir))
+      (save-restriction (widen) (buffer-substring-no-properties
+                                 (point-min) (point-max))))))
+
+(ert-deftest org-jira-comment-headline-test ()
+  ;; The suite runs in UTC; see `set-time-zone-rule' at the top of this file.
+  (should (string= "[[jira-user:12345][@Gowri Hiremath]] [2026-10-02 Fri 15:35]"
+                   (org-jira--comment-headline
+                    "2026-10-02T15:35:12.000+0000" "12345" "Gowri Hiremath")))
+  (should (string= "@Gowri Hiremath [2026-10-02 Fri 15:35]"
+                   (org-jira--comment-headline
+                    "2026-10-02T15:35:12.000+0000" nil "Gowri Hiremath"))))
+
+(ert-deftest org-jira-sdk-comment-author-id-test ()
+  (should (equal "12345" (oref (org-jira-t-comment "1" "2026-10-02T15:35:12.000+0000"
+                                                   "12345" "A" "b")
+                               author-id)))
+  ;; Jira Server has no accountId.
+  (should (equal "jdoe" (oref (org-jira-sdk-create-comment-from-data
+                               '((id . "1") (body . "b") (created . "2026-10-02T15:35:12.000+0000")
+                                 (updated . "2026-10-02T15:35:12.000+0000")
+                                 (author . ((displayName . "J") (name . "jdoe")))))
+                              author-id))))
+
+(ert-deftest org-jira-render-comment-nests-under-comments-test ()
+  (org-jira-t-with-issue-file
+   (let ((text (org-jira-t-render
+                (org-jira-t-comment "1" "2026-10-02T15:35:12.000+0000" "12345" "Ann" "first")
+                (org-jira-t-comment "2" "2026-10-02T16:00:00.000+0000" "678" "Bob" "second"))))
+     (should (= 1 (with-temp-buffer (insert text) (goto-char (point-min))
+                                    (how-many "^\\*\\*\\* Comments$"))))
+     ;; Comments sit after the worklog, not inside it.
+     (should (string-match-p "Worklog: someone\n:PROPERTIES:\n:ID: w1\n:END:\n\\*\\*\\* Comments\n\\*\\*\\*\\* \\[\\[jira-user:12345\\]\\[@Ann\\]\\] \\[[^]]+\\]\n"
+                             text))
+     (should (< (string-match "@Ann" text) (string-match "@Bob" text))))))
+
+(ert-deftest org-jira-render-comment-replaces-by-id-test ()
+  (org-jira-t-with-issue-file
+   (org-jira-t-render
+    (org-jira-t-comment "1" "2026-10-02T15:35:12.000+0000" "12345" "Ann" "old"))
+   (let ((text (org-jira-t-render
+                (org-jira-t-comment "1" "2026-10-02T15:35:12.000+0000" "12345" "Ann" "new"))))
+     (should (string-match-p "new" text))
+     (should-not (string-match-p "old" text))
+     (should (= 1 (with-temp-buffer (insert text) (goto-char (point-min))
+                                    (how-many "^\\*\\*\\*\\* ")))))))
+
+(ert-deftest org-jira-render-comment-migrates-legacy-heading-test ()
+  (org-jira-t-with-issue-file
+   (with-temp-file (expand-file-name "T.org" org-jira-working-dir)
+     (insert "** TODO T-1 an issue\n:PROPERTIES:\n:ID: T-1\n:END:\n"
+             "*** Comment: Ann\n:PROPERTIES:\n:ID: 1\n:END:\n  legacy\n"
+             "*** Worklog: someone\n:PROPERTIES:\n:ID: w1\n:END:\n"))
+   (let ((text (org-jira-t-render
+                (org-jira-t-comment "1" "2026-10-02T15:35:12.000+0000" "12345" "Ann" "body"))))
+     (should-not (string-match-p "Comment: Ann" text))
+     (should-not (string-match-p "legacy" text))
+     (should (string-match-p "\\*\\*\\* Comments\n\\*\\*\\*\\* \\[\\[jira-user:12345\\]" text))
+     (should (string-match-p "Worklog: someone" text)))))
+
+(ert-deftest org-jira-ensure-on-comment-recognizes-nested-comment-test ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "** TODO T-1\n*** Comments\n**** [[jira-user:1][@A]] [2026-10-02 Fri 15:35]\n:PROPERTIES:\n:ID: 9\n:END:\n  hi\n")
+    (should (equal "9" (org-jira-get-from-org 'comment 'id)))
+    (goto-char (point-min))
+    (re-search-forward "^\\*\\*\\* Comments")
+    (should-error (org-jira-get-from-org 'comment 'id))))
+
+(ert-deftest org-jira-user-link-follow-test ()
+  (let ((jiralib-url "https://jira.example.com/") opened)
+    (cl-letf (((symbol-function 'browse-url) (lambda (u) (setq opened u))))
+      (funcall (org-link-get-parameter "jira-user" :follow) "12345" nil))
+    (should (string= "https://jira.example.com/jira/people/12345" opened))))
+
+
+;;; Account name lookup
+
+(defmacro org-jira-t-with-account-names (users cache fetch &rest body)
+  "Run BODY with USERS, CACHE and a `jiralib-get-user' stub returning FETCH.
+Bind `fetched' to the list of ids the stub was asked for."
+  `(let ((org-jira-users ,users)
+         (jiralib-users-cache ,cache)
+         (org-jira--account-names nil)
+         (fetched nil))
+     (cl-letf (((symbol-function 'jiralib-get-user)
+                (lambda (id) (push id fetched) ,fetch)))
+       ,@body)))
+
+(ert-deftest org-jira-account-name-from-users-test ()
+  (org-jira-t-with-account-names '(("Ann A" . "a1")) nil nil
+    (should (string= "Ann A" (org-jira-account-name "a1")))
+    (should-not fetched)))
+
+(ert-deftest org-jira-account-name-from-users-cache-test ()
+  (org-jira-t-with-account-names
+   nil '(((accountId . "b2") (displayName . "Bob B"))) nil
+   (should (string= "Bob B" (org-jira-account-name "b2")))
+   (should-not fetched)))
+
+(ert-deftest org-jira-account-name-fetches-once-test ()
+  (org-jira-t-with-account-names nil nil '((displayName . "Cy C"))
+    (should (string= "Cy C" (org-jira-account-name "c3")))
+    (should (string= "Cy C" (org-jira-account-name "c3")))
+    (should (equal '("c3") fetched))))
+
+(ert-deftest org-jira-account-name-no-fetch-test ()
+  (org-jira-t-with-account-names nil nil '((displayName . "Cy C"))
+    (should-not (org-jira-account-name "c3" t))
+    (should-not fetched)
+    ;; A no-fetch miss is not remembered, so a later lookup may fetch.
+    (should (string= "Cy C" (org-jira-account-name "c3")))))
+
+(ert-deftest org-jira-account-name-remembers-failure-test ()
+  (org-jira-t-with-account-names nil nil (error "boom")
+    (should-not (org-jira-account-name "d4"))
+    (should-not (org-jira-account-name "d4"))
+    (should (equal '("d4") fetched))))
+
+
 (provide 'org-jira-t)
 ;;; org-jira-t.el ends here

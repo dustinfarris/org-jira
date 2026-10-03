@@ -508,14 +508,25 @@ See `org-default-priority' for more info."
            (org-narrow-to-subtree)
            ,@body)))))
 
+(defun org-jira--comment-heading-p ()
+  "Non-nil when point is on a comment heading.
+That is a level-4 heading under a \"Comments\" heading, or a legacy
+\"Comment:\" heading from before comments were nested."
+  (or (and (= (org-current-level) 4)
+           (save-excursion
+             (org-up-heading-safe)
+             (looking-at "\\*+ Comments$")))
+      (save-excursion
+        (forward-thing 'whitespace)
+        (looking-at "Comment:"))))
+
 (defmacro ensure-on-comment (&rest body)
   "Make sure we are on a comment heading, before executing BODY."
   (declare (debug t)
            (indent 0))
   `(save-excursion
      (org-back-to-heading)
-     (forward-thing 'whitespace)
-     (unless (looking-at "Comment:")
+     (unless (org-jira--comment-heading-p)
        (error "Not on a comment region!"))
      (save-restriction
        (org-narrow-to-subtree)
@@ -1686,22 +1697,59 @@ skipped (counted separately; listed in dry-run buffer)."
        org-jira-maybe-reverse-comments
        (cl-remove-if #'org-jira-isa-ignored-comment?)))
 
+(defvar org-jira--account-names nil
+  "Session cache of (ACCOUNT-ID . NAME).  NAME is nil when the lookup failed.")
+
+(defun org-jira-account-name (account-id &optional no-fetch)
+  "Return the display name for ACCOUNT-ID, or nil.
+Consults `org-jira-users' and `jiralib-users-cache', then, unless
+NO-FETCH, asks Jira at most once per session per id, failures
+included.  Pass NO-FETCH from request callbacks: nested synchronous
+`jiralib' calls misbehave inside request.el's process sentinels."
+  (or (cdr (assoc account-id org-jira--account-names))
+      (car (rassoc account-id org-jira-users))
+      (cl-loop for u in jiralib-users-cache
+               when (equal account-id (cdr (assoc 'accountId u)))
+               return (cdr (assoc 'displayName u)))
+      (unless (or no-fetch (assoc account-id org-jira--account-names))
+        (let ((name (ignore-errors
+                      (cdr (assoc 'displayName (jiralib-get-user account-id))))))
+          (push (cons account-id name) org-jira--account-names)
+          name))))
+
+(defun org-jira--comment-headline (created author-id author)
+  "Return the heading text for a comment by AUTHOR written at CREATED.
+AUTHOR-ID, when non-nil, makes the name a `jira-user' link."
+  (format "%s [%s]"
+          (if author-id
+              (format "[[jira-user:%s][@%s]]" author-id author)
+            (format "@%s" author))
+          (org-jira-date-to-org-clock created)))
+
+(defun org-jira--goto-comments-end ()
+  "Move point to the end of the \"*** Comments\" subtree, creating it if needed."
+  (goto-char (point-min))
+  (if (re-search-forward "^\\*\\*\\* Comments$" nil t)
+      (progn (beginning-of-line) (org-end-of-subtree t t))
+    (goto-char (point-max))
+    (unless (bolp) (insert "\n"))
+    (insert "*** Comments\n"))
+  (unless (bolp) (insert "\n")))
+
 (defun org-jira--render-comment (Issue Comment)
   (with-slots (issue-id) Issue
-    (with-slots (comment-id author headline created updated body) Comment
+    (with-slots (comment-id author author-id created updated body) Comment
       (org-jira-log (format "Rendering a comment: %s" body))
       (ensure-on-issue-Issue Issue
         (setq p (org-find-entry-with-id comment-id))
         (when (and p (>= p (point-min))
                    (<= p (point-max)))
           (goto-char p)
-          (org-narrow-to-subtree)
-          (delete-region (point-min) (point-max)))
-        (goto-char (point-max))
-        (unless (looking-at "^")
-          (insert "\n"))
-        (insert "*** ")
-        (org-jira-insert headline "\n")
+          (org-back-to-heading t)
+          (delete-region (point) (progn (org-end-of-subtree t t) (point))))
+        (org-jira--goto-comments-end)
+        (insert "**** ")
+        (org-jira-insert (org-jira--comment-headline created author-id author) "\n")
         (org-narrow-to-subtree)
         (org-jira-entry-put (point) "ID" comment-id)
         (org-jira-entry-put (point) "created" created)
@@ -1709,7 +1757,8 @@ skipped (counted separately; listed in dry-run buffer)."
           (org-jira-entry-put (point) "updated" updated))
         (goto-char (point-max))
         ;;  Insert 2 spaces of indentation so Jira markup won't cause org-markup
-        (org-jira-insert (replace-regexp-in-string "^" "  " (or body "")))))))
+        (org-jira-insert (replace-regexp-in-string "^" "  " (or body "")))
+        (unless (bolp) (insert "\n"))))))
 
 (defun org-jira-update-comments-for-issue (Issue)
   "Update the comments for the specified ISSUE issue."
@@ -2694,6 +2743,14 @@ See `org-jira-get-issues-from-filter'."
 (defun org-jira-open (path)
   "Open a Jira Link from PATH."
   (org-jira-get-issue path))
+
+(defun org-jira-open-user (account-id &optional _)
+  "Browse the Jira profile of ACCOUNT-ID, from a `jira-user' link."
+  (browse-url (format "%s/jira/people/%s"
+                      (replace-regexp-in-string "/*$" "" jiralib-url)
+                      account-id)))
+
+(org-link-set-parameters "jira-user" :follow #'org-jira-open-user)
 
 ;;;###autoload
 (defun org-jira-get-issues-by-board ()
