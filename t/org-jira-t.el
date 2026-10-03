@@ -672,5 +672,107 @@ Bind `fetched' to the list of ids the stub was asked for."
     (should (string= "* TODO one\n* TODO two\n"
                      (save-restriction (widen) (buffer-string))))))
 
+;;; Top-level issues: reading works at any heading level
+
+(defconst org-jira-t-new-layout
+  (concat "* TODO [[jira:T-1][T-1]] one\n:PROPERTIES:\n:ID: T-1\n:END:\n"
+          "** Description\n  text\n"
+          "** Comments\n*** @Ann [2026-10-02 Fri 15:35]\n:PROPERTIES:\n:ID: 90\n:END:\n  hi\n"
+          "** Attachments:\n*** [[u][f.png]]\n:PROPERTIES:\n:ID: 91\n:END:\n"
+          "* TODO [[jira:T-2][T-2]] two\n:PROPERTIES:\n:ID: T-2\n:END:\n"))
+
+(defconst org-jira-t-legacy-layout
+  (concat "* T-Tickets\n"
+          "** TODO [[jira:T-1][T-1]] one\n:PROPERTIES:\n:ID: T-1\n:END:\n"
+          "*** Description\n  text\n"
+          "*** Comments\n**** @Ann [2026-10-02 Fri 15:35]\n:PROPERTIES:\n:ID: 90\n:END:\n  hi\n"
+          "*** Attachments:\n**** [[u][f.png]]\n:PROPERTIES:\n:ID: 91\n:END:\n"
+          "** TODO [[jira:T-2][T-2]] two\n:PROPERTIES:\n:ID: T-2\n:END:\n"))
+
+(defun org-jira-t-issue-id-at (text needle)
+  "In TEXT, put point on the first NEEDLE and return the issue `ensure-on-issue' finds."
+  (with-temp-buffer
+    (org-mode)
+    (insert text)
+    (goto-char (point-min))
+    (search-forward needle)
+    (ensure-on-issue (org-jira-id))))
+
+(ert-deftest org-jira-ensure-on-issue-any-level-test ()
+  (dolist (text (list org-jira-t-new-layout org-jira-t-legacy-layout))
+    (dolist (needle '("one" "Description" "  text" "@Ann" "  hi" "f.png" "Attachments:"))
+      (should (equal "T-1" (org-jira-t-issue-id-at text needle))))
+    (should (equal "T-2" (org-jira-t-issue-id-at text "two")))))
+
+(ert-deftest org-jira-issue-key-p-test ()
+  (dolist (key '("EX-22" "T-1" "AB2_C-10" "AUTO-9616"))
+    (should (org-jira--issue-key-p key)))
+  ;; Comment and worklog ids are numeric; nothing else should pass either.
+  (dolist (key '("10001" "T-" "-1" "T-1x" "T-1\nX" "" nil))
+    (should-not (org-jira--issue-key-p key))))
+
+(ert-deftest org-jira-ensure-on-issue-outside-issue-errors-test ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "#+title: nothing here\n* Notes\n:PROPERTIES:\n:ID: 12\n:END:\n")
+    (goto-char (point-max))
+    (should-error (ensure-on-issue (org-jira-id)))
+    (goto-char (point-min))
+    (should-error (ensure-on-issue (org-jira-id)))))
+
+(ert-deftest org-jira-ensure-on-issue-keeps-point-and-narrowing-test ()
+  (with-temp-buffer
+    (org-mode)
+    (insert org-jira-t-new-layout)
+    (goto-char (point-min))
+    (search-forward "@Ann")
+    (org-narrow-to-subtree)
+    (let ((pos (point)) (min (point-min)) (max (point-max)))
+      (ensure-on-issue (should (= 1 (point-min))))
+      (should (= pos (point)))
+      (should (= min (point-min)))
+      (should (= max (point-max))))))
+
+(ert-deftest org-jira-issue-ids-in-buffer-skips-non-issues-test ()
+  (dolist (text (list org-jira-t-new-layout org-jira-t-legacy-layout))
+    (with-temp-buffer
+      (org-mode)
+      (insert text)
+      (should (equal '("T-1" "T-2") (org-jira--issue-ids-in-buffer))))))
+
+(ert-deftest org-jira-issue-ids-in-buffer-ignores-level-2-numeric-ids-test ()
+  ;; Worklog and attachment headings sit at level 2 under a level-1 issue
+  ;; and carry numeric :ID: properties.
+  (with-temp-buffer
+    (org-mode)
+    (insert "* TODO one\n:PROPERTIES:\n:ID: T-1\n:END:\n"
+            "** Worklog: someone\n:PROPERTIES:\n:ID: 10001\n:END:\n")
+    (should (equal '("T-1") (org-jira--issue-ids-in-buffer)))))
+
+(ert-deftest org-jira-comment-heading-p-any-level-test ()
+  (dolist (text (list org-jira-t-new-layout org-jira-t-legacy-layout))
+    (with-temp-buffer
+      (org-mode)
+      (insert text)
+      (goto-char (point-min))
+      (search-forward "@Ann")
+      (should (org-jira--comment-heading-p))
+      (should (equal "90" (org-jira-get-from-org 'comment 'id)))
+      (goto-char (point-min))
+      (search-forward "Comments")
+      (should-not (org-jira--comment-heading-p))
+      (goto-char (point-min))
+      (search-forward "f.png")
+      (should-not (org-jira--comment-heading-p)))))
+
+(ert-deftest org-jira-comment-heading-p-accepts-legacy-heading-test ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "* TODO one\n:PROPERTIES:\n:ID: T-1\n:END:\n** Comment: Ann\n:PROPERTIES:\n:ID: 90\n:END:\n")
+    (goto-char (point-min))
+    (search-forward "Comment:")
+    (beginning-of-line)
+    (should (org-jira--comment-heading-p))))
+
 (provide 'org-jira-t)
 ;;; org-jira-t.el ends here

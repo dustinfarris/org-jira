@@ -385,6 +385,27 @@ See `org-default-priority' for more info."
 
 (defun org-jira-log (s) (when (eq 'debug org-jira-verbosity) (message "%s" s)))
 
+(defconst org-jira--issue-key-regexp "\\`[A-Z][A-Z0-9_]*-[0-9]+\\'"
+  "Matches an issue key such as EX-22, and not a numeric comment or worklog id.")
+
+(defun org-jira--issue-key-p (id)
+  "Non-nil when ID, an `ID' property value, is an issue key."
+  (and (stringp id) (string-match-p org-jira--issue-key-regexp id)))
+
+(defun org-jira--goto-issue-heading ()
+  "Move point to the heading of the issue that contains point.
+Walks up from the current heading to the nearest one whose `ID' is an
+issue key, so it works at any level.  Signals an error when point is not
+inside an issue."
+  (unless (and (ignore-errors (org-back-to-heading t) t)
+               (catch 'found
+                 (while t
+                   (when (org-jira--issue-key-p (org-entry-get nil "ID"))
+                     (throw 'found t))
+                   (unless (org-up-heading-safe)
+                     (throw 'found nil)))))
+    (error "Not on an issue region!")))
+
 (defmacro ensure-on-issue (&rest body)
   "Make sure we are on an issue heading, before executing BODY."
   (declare (debug t)
@@ -392,11 +413,7 @@ See `org-default-priority' for more info."
   `(save-excursion
     (save-restriction
       (widen)
-      (unless (looking-at "^\\*\\* ")
-        (search-backward-regexp "^\\*\\* " nil t)) ; go to top heading
-      (let ((org-jira-id (org-jira-id)))
-        (unless (and org-jira-id (string-match (jiralib-get-issue-regexp) (downcase org-jira-id)))
-          (error "Not on an issue region!")))
+      (org-jira--goto-issue-heading)
       ,@body)))
 
 (defmacro org-jira-with-callback (&rest body)
@@ -510,11 +527,10 @@ See `org-default-priority' for more info."
 
 (defun org-jira--comment-heading-p ()
   "Non-nil when point is on a comment heading.
-That is a level-4 heading under a \"Comments\" heading, or a legacy
-\"Comment:\" heading from before comments were nested."
-  (or (and (= (org-current-level) 4)
-           (save-excursion
-             (org-up-heading-safe)
+That is a heading directly under a \"Comments\" heading, at whatever
+level, or a legacy \"Comment:\" heading from before comments were nested."
+  (or (save-excursion
+        (and (org-up-heading-safe)
              (looking-at "\\*+ Comments$")))
       (save-excursion
         (forward-thing 'whitespace)
@@ -2295,6 +2311,14 @@ Used in org-jira-read-resolution and org-jira-progress-issue calls.")
                                      resolutions))))
       (cons 'name resolution-name))))
 
+(defun org-jira--issue-ids-in-buffer ()
+  "Return the keys of the issues in the buffer, in order.
+Matches levels 1 and 2 so files from before issues became top-level work
+too, and keeps only issue keys: worklogs and attachments also carry `ID'
+properties, and at level 2 they would otherwise be mistaken for issues."
+  (cl-remove-if-not #'org-jira--issue-key-p
+                    (org-map-entries #'org-id-get "LEVEL=1|LEVEL=2")))
+
 (defun org-jira-refresh-issues-in-buffer-loose ()
   "Iterates over all level 1-2 headings in current buffer, refreshing on issue :ID:.
 It differs with `org-jira-refresh-issues-in-buffer' in that it accepts the current buffer
@@ -2304,8 +2328,7 @@ as an org-jira project file or not."
   (save-excursion
     (save-restriction
       (widen)
-      (let* ((org-ids (org-map-entries 'org-id-get "LEVEL=1|LEVEL=2"))
-             (org-ids (delq nil org-ids))
+      (let* ((org-ids (org-jira--issue-ids-in-buffer))
              (file-name (file-name-sans-extension buffer-file-name)))
         (mapcar (lambda (org-id) (org-jira--refresh-issue org-id file-name))
                 org-ids)))))
@@ -2317,8 +2340,7 @@ Where issue-id will be something such as \"EX-22\"."
   (save-excursion
     (save-restriction
       (widen)
-      (let* ((org-ids (org-map-entries 'org-id-get "LEVEL=1|LEVEL=2"))
-             (org-ids (delq nil org-ids)))
+      (let* ((org-ids (org-jira--issue-ids-in-buffer)))
         ;; It's possible we could be on a non-org-jira headline, but
         ;; that should be an exceptional case and not necessitating a
         ;; fix atm.
