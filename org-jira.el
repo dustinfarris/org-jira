@@ -1101,6 +1101,25 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
          (project-buffer (find-file-noselect project-file)))
     project-buffer))
 
+(defun org-jira--migrate-tickets-heading (proj-key)
+  "Remove the legacy \"PROJ-KEY-Tickets\" heading, promoting its subtree.
+Older versions wrapped every issue of a project file in that level-1
+heading.  Issues are now level 1 themselves, so on the first render into
+a file that still has the wrapper, drop it and move its children up a
+level.  Does nothing when the heading is absent, so it is safe to call on
+every render."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (when (re-search-forward
+             (format "^\\* %s-Tickets[ \t]*$" (regexp-quote proj-key)) nil t)
+        (beginning-of-line)
+        (let ((end (copy-marker (save-excursion (org-end-of-subtree t t) (point)))))
+          (delete-region (point) (progn (forward-line 1) (point)))
+          (org-map-region #'org-promote (point) end)
+          (set-marker end nil))))))
+
 (defun org-jira--is-top-headline? (proj-key)
   "For PROJ-KEY, check if it is a top headline or not."
   (let ((elem (org-element-at-point)))

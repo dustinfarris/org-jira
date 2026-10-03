@@ -615,5 +615,62 @@ Bind `fetched' to the list of ids the stub was asked for."
                               "jira:T-1" nil)))))
 
 
+;;; Top-level issues: migrating the legacy PROJ-Tickets wrapper
+
+(ert-deftest org-jira-migrate-tickets-heading-promotes-subtree-test ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "#+title: T\n* T-Tickets\n** TODO [[jira:T-1][T-1]] one\n:PROPERTIES:\n:ID: T-1\n:END:\n"
+            "*** description: [[x][T-1]]\n  text\n*** Comments\n**** @Ann [2026-10-02 Fri 15:35]\n"
+            "** TODO [[jira:T-2][T-2]] two\n")
+    (org-jira--migrate-tickets-heading "T")
+    (should (string= (buffer-string)
+                     (concat "#+title: T\n* TODO [[jira:T-1][T-1]] one\n:PROPERTIES:\n:ID: T-1\n:END:\n"
+                             "** description: [[x][T-1]]\n  text\n** Comments\n*** @Ann [2026-10-02 Fri 15:35]\n"
+                             "* TODO [[jira:T-2][T-2]] two\n")))))
+
+(ert-deftest org-jira-migrate-tickets-heading-is-idempotent-test ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "* T-Tickets\n** TODO one\n*** Comments\n")
+    (org-jira--migrate-tickets-heading "T")
+    (let ((once (buffer-string)))
+      (org-jira--migrate-tickets-heading "T")
+      (should (string= once (buffer-string)))
+      (should (string= "* TODO one\n** Comments\n" once)))))
+
+(ert-deftest org-jira-migrate-tickets-heading-leaves-other-headings-test ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Notes\n** keep me\n* T-Tickets\n** TODO one\n* Other\n** also kept\n")
+    (org-jira--migrate-tickets-heading "T")
+    (should (string= "* Notes\n** keep me\n* TODO one\n* Other\n** also kept\n"
+                     (buffer-string))))
+  ;; A different project's wrapper is not ours to remove.
+  (with-temp-buffer
+    (org-mode)
+    (insert "* X-Tickets\n** TODO one\n")
+    (org-jira--migrate-tickets-heading "T")
+    (should (string= "* X-Tickets\n** TODO one\n" (buffer-string)))))
+
+(ert-deftest org-jira-migrate-tickets-heading-keeps-text-under-wrapper-test ()
+  ;; Nothing a person wrote under the wrapper heading may be lost.
+  (with-temp-buffer
+    (org-mode)
+    (insert "* T-Tickets\nmy own note\n** TODO one\n")
+    (org-jira--migrate-tickets-heading "T")
+    (should (string= "my own note\n* TODO one\n" (buffer-string)))))
+
+(ert-deftest org-jira-migrate-tickets-heading-ignores-narrowing-test ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "* T-Tickets\n** TODO one\n** TODO two\n")
+    (goto-char (point-min))
+    (forward-line 2)
+    (org-narrow-to-subtree)
+    (org-jira--migrate-tickets-heading "T")
+    (should (string= "* TODO one\n* TODO two\n"
+                     (save-restriction (widen) (buffer-string))))))
+
 (provide 'org-jira-t)
 ;;; org-jira-t.el ends here
