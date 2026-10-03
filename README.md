@@ -9,8 +9,7 @@ Sample of an org-jira buffer with a ticket synced using the
 `org-jira-get-issues-from-custom-jql` functionality:
 
 ```org
-* AHU-Tickets
-** TODO [#C] a sample ticket with priority, in my AHU project           :AHU_39:
+* TODO [#C] [[jira:AHU-39][AHU-39]] a sample ticket with priority, in my AHU project
 :PROPERTIES:
 :assignee: Matthew Carter
 :filename: this-years-work
@@ -29,16 +28,16 @@ CLOCK: [2022-02-24 Thu 20:30]--[2022-02-24 Thu 20:35] =>  0:05
   :id: 10359
   Sample time clock entry
 :END:
-*** description: [[https://example.atlassian.net/browse/AHU-39][AHU-39]]
+** Description
   The summary is here
-*** Comment: Matthew Carter
+** Comments
+*** [[jira-user:5b10a2844c20165700ede21g][@Matthew Carter]] [2019-01-24 Thu 23:25]
 :PROPERTIES:
 :ID:       10680
 :created:  2019-01-24T23:25:19.455-0500
 :updated:  2019-01-24T23:27:36.125-0500
 :END:
   a sample comment on 39
-
 ```
 
 ## TOC
