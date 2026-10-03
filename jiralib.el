@@ -1138,6 +1138,16 @@ Return no more than MAX-NUM-RESULTS."
   (cond ((eq 0 (length account-id)) nil) ;; Unassigned
         (t (jiralib-call "getUser" nil account-id))))
 
+(defun jiralib-search-viewable-users (issue-key query)
+  "Return users matching QUERY who can view ISSUE-KEY, as a list of alists.
+These are the people who can be mentioned on the issue.  The request
+is always synchronous."
+  (let ((jiralib-complete-callback nil))
+    (append (jiralib--rest-call-it
+             "/rest/api/2/user/viewissue/search"
+             :params `((issueKey . ,issue-key) (query . ,query) (maxResults . 20)))
+            nil)))
+
 (defvar jiralib-users-cache nil "Cached list of users.")
 (defvar org-jira-users nil "List of org-jira users (defined in org-jira.el).")
 

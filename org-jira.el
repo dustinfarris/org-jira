@@ -1228,53 +1228,215 @@ ISSUES is a list of `org-jira-sdk-issue' records."
   (org-show-all)
   (org-cycle))
 
+;;; Comment popup buffer
+
+(defcustom org-jira-comment-to-jira-function #'identity
+  "Function converting a comment written in org into Jira markup.
+It is called with the comment text from the popup buffer and must
+return the string to send to Jira.  The default sends the text as
+written."
+  :type 'function
+  :group 'org-jira)
+
+(defvar org-jira-comment-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'org-jira-comment-finish)
+    (define-key map (kbd "C-c C-k") #'org-jira-comment-abort)
+    (define-key map "@" #'org-jira-comment-insert-at)
+    map)
+  "Keymap for `org-jira-comment-mode'.")
+
+(define-minor-mode org-jira-comment-mode
+  "Minor mode for the org-jira comment popup buffer.
+
+\\{org-jira-comment-mode-map}"
+  :lighter " JiraComment"
+  :keymap org-jira-comment-mode-map)
+
+(defvar-local org-jira-comment--submit-fn nil
+  "Function called with the converted comment text on `org-jira-comment-finish'.")
+
+(defvar-local org-jira-comment--issue-id nil
+  "Key of the issue the popup comment is for, used to look up mentionable users.")
+
+(defcustom org-jira-comment-mention-insert-function
+  (lambda (id _name) (format "[~accountid:%s]" id))
+  "Function returning the text to insert for an @-mention in the popup.
+It is called with the user's account ID and display name.  The default
+inserts Jira markup, which suits an identity
+`org-jira-comment-to-jira-function'; if you convert from org, return
+something your converter turns into a mention."
+  :type 'function
+  :group 'org-jira)
+
+(defvar org-jira-comment--mention-cache nil
+  "Alist of ((ISSUE-KEY . QUERY) . USERS) for mention completion.")
+
+(defconst org-jira-comment--mention-min-query 2
+  "Characters needed after an @ before Jira is asked for users.")
+
+(defun org-jira-comment--mention-users (issue-key query)
+  "Return the users matching QUERY on ISSUE-KEY, from cache or Jira."
+  (when (>= (length query) org-jira-comment--mention-min-query)
+    (let* ((key (cons issue-key query))
+           (hit (assoc key org-jira-comment--mention-cache)))
+      (if hit
+          (cdr hit)
+        (let ((users (condition-case err
+                         (jiralib-search-viewable-users issue-key query)
+                       (error (message "org-jira: user search failed: %s"
+                                       (error-message-string err))
+                              nil))))
+          (push (cons key users) org-jira-comment--mention-cache)
+          users)))))
+
+(defun org-jira-comment--mention-candidates (issue-key query)
+  "Return display names of users matching QUERY on ISSUE-KEY."
+  (mapcar (lambda (user) (cdr (assq 'displayName user)))
+          (org-jira-comment--mention-users issue-key query)))
+
+(defun org-jira-comment--mention-user (issue-key name)
+  "Return the cached user on ISSUE-KEY whose display name is NAME."
+  (cl-loop for (key . users) in org-jira-comment--mention-cache
+           when (equal (car key) issue-key)
+           thereis (cl-find name users
+                            :key (lambda (u) (cdr (assq 'displayName u)))
+                            :test #'equal)))
+
+(defun org-jira-comment-mention-capf ()
+  "Complete an @-mention at point in the comment popup."
+  (when (and org-jira-comment--issue-id
+             (looking-back "\\(?:^\\|[ \t\n(]\\)@\\([^ \t\n@]*\\)"
+                           (line-beginning-position)))
+    (let* ((issue-id org-jira-comment--issue-id)
+           (start (match-beginning 1))
+           (marker (copy-marker (1- start))))
+      (list start (point)
+            (lambda (string pred action)
+              (if (eq action 'metadata)
+                  '(metadata (category . org-jira-user)
+                             (display-sort-function . identity))
+                (let ((completion-ignore-case t))
+                  (complete-with-action
+                   action
+                   (org-jira-comment--mention-candidates issue-id string)
+                   string pred))))
+            :annotation-function
+            (lambda (name)
+              (let ((email (cdr (assq 'emailAddress
+                                      (org-jira-comment--mention-user issue-id name)))))
+                (and email (concat "  " email))))
+            :exit-function
+            (lambda (name status)
+              (let ((user (org-jira-comment--mention-user issue-id name)))
+                (when (and user (memq status '(finished exact)))
+                  (delete-region marker (point))
+                  (insert (funcall org-jira-comment-mention-insert-function
+                                   (cdr (assq 'accountId user)) name)))))))))
+
+(defun org-jira-comment-insert-at ()
+  "Insert an @ and offer completion of users who can be mentioned."
+  (interactive)
+  (insert "@")
+  (let ((inhibit-message t))
+    (completion-at-point)))
+
+(defun org-jira-comment-edit-buffer (name initial submit-fn &optional issue-id)
+  "Pop up an org buffer NAME pre-filled with INITIAL to write a comment.
+SUBMIT-FN is called with the converted text when the user finishes.
+ISSUE-ID, when given, enables @-mention completion for that issue."
+  (let ((buf (get-buffer-create name)))
+    (with-current-buffer buf
+      (erase-buffer)
+      (org-mode)
+      (org-jira-comment-mode 1)
+      ;; Indenting inside a src block would otherwise open an *Org Src*
+      ;; edit buffer, which popup managers show in this window's place.
+      (setq-local org-src-tab-acts-natively nil)
+      (setq org-jira-comment--submit-fn submit-fn
+            org-jira-comment--issue-id issue-id)
+      (add-hook 'completion-at-point-functions #'org-jira-comment-mention-capf nil t)
+      (insert initial)
+      (setq header-line-format
+            (substitute-command-keys
+             "Jira comment: \\[org-jira-comment-finish] to submit, \\[org-jira-comment-abort] to abort, @ to mention")))
+    (pop-to-buffer buf)
+    buf))
+
+(defun org-jira-comment-finish ()
+  "Convert the popup buffer's contents and submit them as a Jira comment."
+  (interactive)
+  (let ((text (string-trim (buffer-string)))
+        (submit-fn org-jira-comment--submit-fn))
+    (when (string-empty-p text)
+      (user-error "Comment is empty; use `org-jira-comment-abort' to discard"))
+    (let ((converted (funcall org-jira-comment-to-jira-function text)))
+      (quit-window t)
+      (funcall submit-fn converted))))
+
+(defun org-jira-comment-abort ()
+  "Discard the comment popup buffer without submitting."
+  (interactive)
+  (quit-window t))
+
+(defun org-jira--comment-body-for-edit (body)
+  "Return BODY ready for editing in the popup.
+Rendering guards comment bodies with a two-space indent; strip it only
+when every non-blank line carries it, so nested lists survive."
+  (if (cl-every (lambda (line) (or (string-blank-p line) (string-prefix-p "  " line)))
+                (split-string body "\n"))
+      (replace-regexp-in-string "^  " "" body)
+    body))
+
 ;;;###autoload
 (defun org-jira-update-comment ()
-  "Update a comment for the current issue."
+  "Edit the comment at point in a popup buffer, then update it in Jira.
+On a heading with no comment ID, the text is added as a new comment."
   (interactive)
   (let* ((issue-id (org-jira-get-from-org 'issue 'key)) ; Really the key
          (filename (org-jira-filename))
          (comment-id (org-jira-get-from-org 'comment 'id))
-         (comment (replace-regexp-in-string "^  " "" (org-jira-get-comment-body comment-id))))
-    (lexical-let ((issue-id issue-id)
-                  (filename filename))
-      (let ((callback-edit
-             (cl-function
-              (lambda (&key _data &allow-other-keys)
-                (ensure-on-issue-id-with-filename
-                    issue-id filename
-                    (org-jira-update-comments-for-current-issue)))))
-            (callback-add
-             (cl-function
-              (lambda (&key _data &allow-other-keys)
-                (ensure-on-issue-id-with-filename
-                    issue-id filename
-                    ;; @TODO :optim: Has to be a better way to do this
-                    ;; than delete region (like update the unmarked
-                    ;; one)
-                    (org-jira-delete-current-comment)
-                    (org-jira-update-comments-for-current-issue))))))
-        (if comment-id
-            (jiralib-edit-comment issue-id comment-id comment callback-edit)
-          (jiralib-add-comment issue-id comment callback-add))))))
+         (body (org-jira--comment-body-for-edit
+                (org-jira-get-comment-body comment-id))))
+    (org-jira-comment-edit-buffer
+     (format "*org-jira-comment: %s*" issue-id) body
+     (lambda (comment)
+       (if comment-id
+           (jiralib-edit-comment
+            issue-id comment-id comment
+            (cl-function
+             (lambda (&key _data &allow-other-keys)
+               (ensure-on-issue-id-with-filename issue-id filename
+                 (org-jira-update-comments-for-current-issue)))))
+         (jiralib-add-comment
+          issue-id comment
+          (cl-function
+           (lambda (&key _data &allow-other-keys)
+             (ensure-on-issue-id-with-filename issue-id filename
+               ;; @TODO :optim: Has to be a better way to do this
+               ;; than delete region (like update the unmarked one)
+               (org-jira-delete-current-comment)
+               (org-jira-update-comments-for-current-issue)))))))
+     issue-id)))
 
-(defun org-jira-add-comment (issue-id filename comment)
-  "For ISSUE-ID in FILENAME, add a new COMMENT string to the issue region."
+;;;###autoload
+(defun org-jira-add-comment (issue-id filename &optional comment)
+  "For ISSUE-ID in FILENAME, add a new COMMENT string to the issue.
+Interactively, COMMENT is written in an org popup buffer and run
+through `org-jira-comment-to-jira-function' before sending."
   (interactive
-   (let* ((issue-id (org-jira-get-from-org 'issue 'id))
-          (filename (org-jira-filename))
-          (comment (read-string (format  "Comment (%s): " issue-id))))
-     (list issue-id filename comment)))
-  (lexical-let ((issue-id issue-id)
-                (filename filename))
-    (ensure-on-issue-id-with-filename issue-id filename
-      (goto-char (point-max))
+   (list (org-jira-get-from-org 'issue 'id) (org-jira-filename) nil))
+  (if comment
       (jiralib-add-comment
        issue-id comment
        (cl-function
         (lambda (&key _data &allow-other-keys)
           (ensure-on-issue-id-with-filename issue-id filename
-            (org-jira-update-comments-for-current-issue))))))))
+            (org-jira-update-comments-for-current-issue)))))
+    (org-jira-comment-edit-buffer
+     (format "*org-jira-comment: %s*" issue-id) ""
+     (lambda (text) (org-jira-add-comment issue-id filename text))
+     issue-id)))
 
 (defun org-jira-org-clock-to-date (org-time)
   "Convert ORG-TIME formatted date into a plain date string."

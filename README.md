@@ -56,6 +56,7 @@ CLOCK: [2022-02-24 Thu 20:30]--[2022-02-24 Thu 20:35] =>  0:05
         - [Getting Started](#getting-started)
         - [Keybinds](#keybinds)
         - [Customization](#customization)
+            - [Writing comments in a popup buffer](#writing-comments-in-a-popup-buffer)
             - [Get Issues from Custom JQL](#get-issues-from-custom-jql)
             - [Streamlined transition flow](#streamlined-transition-flow)
             - [Basic auth via personal API tokens (secure'ish)](#basic-auth-via-personal-api-tokens-secureish)
@@ -152,6 +153,22 @@ Some of the important keybindings:
 ```
 
 ### Customization
+
+#### Writing comments in a popup buffer
+
+`org-jira-add-comment` and `org-jira-update-comment` open a popup `org-mode` buffer (`C-c C-c` submits, `C-c C-k` aborts). Editing pre-fills it with the existing comment. Jira markup is not org, so set `org-jira-comment-to-jira-function` to a function that converts the org text you wrote into Jira markup before it is sent (the default, `identity`, sends it as written):
+
+```lisp
+(setq org-jira-comment-to-jira-function
+      (lambda (org)
+        (with-temp-buffer
+          (insert org)
+          (call-process-region (point-min) (point-max) "pandoc" t t nil
+                               "-f" "org" "-t" "jira" "--wrap=none")
+          (string-trim (buffer-string)))))
+```
+
+Typing `@` in the popup completes users who can view the issue (queried from Jira as you type). `org-jira-comment-mention-insert-function` receives the account ID and display name and returns the text to insert. The default inserts Jira's `[~accountid:ID]`; if you convert from org, return something your converter turns into that, for example an org link carrying the ID.
 
 #### Get Issues from Custom JQL
 

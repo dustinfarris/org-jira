@@ -48,5 +48,20 @@
    (string= "2017-01-01T00:00:00.000+0000"
             (jiralib-format-datetime "2017-01-01 00:00:00"))))
 
+(ert-deftest jiralib-search-viewable-users-test ()
+  (let (seen)
+    (cl-letf (((symbol-function 'jiralib--rest-call-it)
+               (lambda (api &rest args)
+                 (setq seen (list api args jiralib-complete-callback))
+                 [((accountId . "a1") (displayName . "Jane Doe"))])))
+      (let ((jiralib-complete-callback #'ignore))
+        (should (equal '(((accountId . "a1") (displayName . "Jane Doe")))
+                       (jiralib-search-viewable-users "T-1" "jan"))))
+      (should (equal "/rest/api/2/user/viewissue/search" (nth 0 seen)))
+      (should (equal '((issueKey . "T-1") (query . "jan") (maxResults . 20))
+                     (plist-get (nth 1 seen) :params)))
+      ;; Must be synchronous, whatever the caller's callback binding.
+      (should-not (nth 2 seen)))))
+
 (provide 'jiralib-t)
 ;;; jiralib-t.el ends here
