@@ -866,5 +866,43 @@ Bind `fetched' to the list of ids the stub was asked for."
                  (org-jira-t-comment "1" "2026-10-02T15:35:12.000+0000" "12345" "Ann" "hi"))))
       (should (string-match-p ":END:\n\\*\\* Comments\n\\*\\*\\* \\[\\[jira-user:12345\\]" text)))))
 
+
+;;; Top-level issues: a wrapper heading with a keyword, priority or tags
+
+(ert-deftest org-jira-migrate-tickets-heading-accepts-keyword-and-priority-test ()
+  ;; The detection this replaced compared the heading's title, so these were
+  ;; recognised as the wrapper.
+  (dolist (wrapper '("* TODO T-Tickets" "* TODO [#A] T-Tickets" "* T-Tickets   "))
+    (with-temp-buffer
+      (org-mode)
+      (insert wrapper "\n** TODO one\n")
+      (org-jira--migrate-tickets-heading "T")
+      (should (string= "* TODO one\n" (buffer-string))))))
+
+(ert-deftest org-jira-migrate-tickets-heading-moves-tags-to-filetags-test ()
+  ;; Issues inherited the wrapper's tags; they must keep inheriting them.
+  (with-temp-buffer
+    (org-mode)
+    (insert "* T-Tickets  :work:\n** TODO one\n")
+    (org-jira--migrate-tickets-heading "T")
+    (should (string= "#+filetags: :work:\n* TODO one\n" (buffer-string))))
+  ;; An existing #+filetags: line is extended without duplicates.
+  (with-temp-buffer
+    (org-mode)
+    (insert "#+title: T\n#+filetags: :a:\n* T-Tickets :b:a:\n** TODO one\n")
+    (org-jira--migrate-tickets-heading "T")
+    (should (string= "#+title: T\n#+filetags: :a:b:\n* TODO one\n" (buffer-string)))))
+
+(ert-deftest org-jira-render-issue-migrates-tagged-wrapper-test ()
+  (org-jira-t-with-project-file
+      (concat "* T-Tickets  :work:\n"
+              "** TODO [[jira:T-2][T-2]] other\n:PROPERTIES:\n:ID: T-2\n:END:\n")
+    (let ((text (org-jira-t-render-issue "Fix the thing")))
+      (should-not (string-match-p "Tickets" text))
+      (should (string-match-p "\\`#\\+filetags: :work:\n" text))
+      (should (string-match-p "^\\* TODO \\[\\[jira:T-2\\]\\[T-2\\]\\] other$" text))
+      (should (string-match-p "^\\* TODO .*Fix the thing$" text))
+      (should-not (string-match-p "^\\*\\* TODO" text)))))
+
 (provide 'org-jira-t)
 ;;; org-jira-t.el ends here

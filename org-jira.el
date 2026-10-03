@@ -1117,24 +1117,45 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
          (project-buffer (find-file-noselect project-file)))
     project-buffer))
 
+(defun org-jira--add-file-tags (tags)
+  "Add TAGS to the buffer's `#+filetags:' line, creating the line at the top.
+Tags already on the line are kept and not repeated."
+  (save-excursion
+    (goto-char (point-min))
+    (if (re-search-forward "^#\\+filetags:[ \t]*\\(.*\\)$" nil t)
+        (let* ((existing (save-match-data
+                           (split-string (match-string 1) ":" t "[ \t]+")))
+               (all (append existing
+                            (cl-remove-if (lambda (tag) (member tag existing)) tags))))
+          (replace-match (format ":%s:" (string-join all ":")) t t nil 1))
+      (insert (format "#+filetags: :%s:\n" (string-join tags ":"))))))
+
 (defun org-jira--migrate-tickets-heading (proj-key)
   "Remove the legacy \"PROJ-KEY-Tickets\" heading, promoting its subtree.
 Older versions wrapped every issue of a project file in that level-1
 heading.  Issues are now level 1 themselves, so on the first render into
 a file that still has the wrapper, drop it and move its children up a
-level.  Does nothing when the heading is absent, so it is safe to call on
-every render."
+level.  The heading is recognised by its title, so a TODO keyword, a
+priority cookie or tags on it do not hide it; its tags move to the file's
+`#+filetags:' line so the issues keep inheriting them.  Does nothing when
+the heading is absent, so it is safe to call on every render."
   (save-excursion
     (save-restriction
       (widen)
       (goto-char (point-min))
-      (when (re-search-forward
-             (format "^\\* %s-Tickets[ \t]*$" (regexp-quote proj-key)) nil t)
-        (beginning-of-line)
-        (let ((end (copy-marker (save-excursion (org-end-of-subtree t t) (point)))))
-          (delete-region (point) (progn (forward-line 1) (point)))
-          (org-map-region #'org-promote (point) end)
-          (set-marker end nil))))))
+      (let ((title (format "%s-Tickets" proj-key))
+            (found nil))
+        (while (and (not found) (re-search-forward "^\\* " nil t))
+          (when (equal (org-get-heading t t t t) title)
+            (setq found t)))
+        (when found
+          (beginning-of-line)
+          (let ((tags (org-get-tags nil t))
+                (end (copy-marker (save-excursion (org-end-of-subtree t t) (point)))))
+            (delete-region (point) (progn (forward-line 1) (point)))
+            (org-map-region #'org-promote (point) end)
+            (set-marker end nil)
+            (when tags (org-jira--add-file-tags tags))))))))
 
 (defun org-jira--render-description (Issue)
   "Write the description of ISSUE under its \"Description\" subheading.
